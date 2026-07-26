@@ -86,7 +86,10 @@ import {
 } from "./personaRuntimeDropdown";
 import { ServerModelField } from "./ServerModelField";
 import { ServerRunsOnBanner } from "./ServerRunsOnBanner";
-import { useServerAgentEditContext } from "./useServerAgentEditContext";
+import {
+  useServerAgentEditContext,
+  withCurrentValueOption,
+} from "./useServerAgentEditContext";
 
 type AgentDefinitionDialogProps = {
   open: boolean;
@@ -377,6 +380,27 @@ export function AgentDefinitionDialog({
     (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
     blankRuntimeModelProviderEditable;
   const trimmedProvider = provider.trim();
+  // Server residency: a definition deployed to a spawner is configured there,
+  // so the harness belongs to the host and the model catalog is the one it
+  // advertises. Matched on the *initial* name — the slug the spec was published
+  // under does not change while the user is retyping the display name.
+  const { agents: serverAgents } = useServerAgents();
+  const deployedServerAgent = React.useMemo(() => {
+    if (isCreateMode || !initialValues) return null;
+    const slug = slugFromName(initialValues.displayName);
+    if (!slug) return null;
+    return serverAgents.find((candidate) => candidate.slug === slug) ?? null;
+  }, [isCreateMode, initialValues, serverAgents]);
+  const server = useServerAgentEditContext({
+    relocatedToSpawner: null,
+    deployedSpawnerPubkey: deployedServerAgent?.spawnerPubkey ?? null,
+    agentPubkey: deployedServerAgent?.status.agentPubkey ?? null,
+    slug: deployedServerAgent?.slug ?? null,
+    provider: trimmedProvider,
+  });
+  const serverContext = server.context;
+  const serverAi = server.ai;
+
   // Required credential env keys for this runtime + provider combination.
   // Used to show required markers on the LLM provider label and amber
   // locked rows in the env vars editor.
@@ -594,6 +618,7 @@ export function AgentDefinitionDialog({
   React.useEffect(() => {
     if (
       !open ||
+      serverContext ||
       !modelFieldVisible ||
       isCustomModelEditing ||
       !shouldClearKnownModelForSelectionScope({
@@ -614,6 +639,7 @@ export function AgentDefinitionDialog({
     open,
     effectiveProvider,
     runtime,
+    serverContext,
   ]);
 
   const selection: RuntimeModelProviderSelection = {
@@ -676,27 +702,6 @@ export function AgentDefinitionDialog({
       }),
     );
   }
-
-  // Server residency: a definition deployed to a spawner is configured there,
-  // so the harness belongs to the host and the model catalog is the one it
-  // advertises. Matched on the *initial* name — the slug the spec was published
-  // under does not change while the user is retyping the display name.
-  const { agents: serverAgents } = useServerAgents();
-  const deployedServerAgent = React.useMemo(() => {
-    if (isCreateMode || !initialValues) return null;
-    const slug = slugFromName(initialValues.displayName);
-    if (!slug) return null;
-    return serverAgents.find((candidate) => candidate.slug === slug) ?? null;
-  }, [isCreateMode, initialValues, serverAgents]);
-  const server = useServerAgentEditContext({
-    relocatedToSpawner: null,
-    deployedSpawnerPubkey: deployedServerAgent?.spawnerPubkey ?? null,
-    agentPubkey: deployedServerAgent?.status.agentPubkey ?? null,
-    slug: deployedServerAgent?.slug ?? null,
-    provider: trimmedProvider,
-  });
-  const serverContext = server.context;
-  const serverAi = server.ai;
 
   return (
     <Dialog
@@ -824,7 +829,6 @@ export function AgentDefinitionDialog({
               className="space-y-5"
               data-testid={`agent-${aiConfigurationMode}-configuration-section`}
             >
-              {/* Harness is the spawner's choice for a server-hosted agent. */}
               {aiConfigurationMode === "custom" && !serverContext ? (
                 <AgentHarnessField
                   disabled={isPending || runtimesLoading}
@@ -847,13 +851,15 @@ export function AgentDefinitionDialog({
                   onValueChange={handleProviderDropdownChange}
                   options={
                     serverContext && serverAi
-                      ? server.providerOptions
+                      ? withCurrentValueOption(server.providerOptions, provider)
                       : providerDropdownOptions
                   }
                   placeholder="Choose a provider"
                   providerValue={provider}
-                  selectValue={providerSelectValue}
-                  showCustomInput={showCustomProviderInput}
+                  selectValue={
+                    serverContext ? trimmedProvider : providerSelectValue
+                  }
+                  showCustomInput={!serverContext && showCustomProviderInput}
                 />
               ) : null}
 
@@ -909,11 +915,13 @@ export function AgentDefinitionDialog({
                     modelDiscoveryStatus={modelDiscoveryStatus}
                     modelDropdownOptions={
                       serverContext && serverAi
-                        ? server.modelOptions
+                        ? withCurrentValueOption(server.modelOptions, model)
                         : modelDropdownOptions
                     }
                     modelSelectValue={
-                      serverContext && serverAi ? model : modelSelectValue
+                      serverContext && serverAi
+                        ? model.trim()
+                        : modelSelectValue
                     }
                     onCustomModelChange={setModel}
                     showSharedComputeAutoHint={
@@ -929,7 +937,7 @@ export function AgentDefinitionDialog({
                 ) : null}
               </AnimatePresence>
 
-              {aiConfigurationMode === "defaults" ? (
+              {aiConfigurationMode === "defaults" && !serverContext ? (
                 <AgentCreateAiDefaultsSummary
                   canChooseProvider={runtimeCanChooseLlmProvider}
                   harness={runtimeSummaryLabel}
