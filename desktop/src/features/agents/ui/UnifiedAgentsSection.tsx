@@ -293,6 +293,7 @@ function AgentPersonaCard({
             errorLabel={friendlyError}
             errorTestId={`agent-runtime-error-${agent.pubkey}`}
             isActive={isActive}
+            isRelocated={agent.relocatedToSpawner !== null}
             isStarting={startingAgentPubkey === agent.pubkey}
             label={title}
             startTestId={`agent-runtime-start-${agent.pubkey}`}
@@ -379,6 +380,7 @@ function StandaloneAgentCard({
           errorLabel={friendlyError}
           errorTestId={`agent-runtime-error-${agent.pubkey}`}
           isActive={isActive}
+          isRelocated={agent.relocatedToSpawner !== null}
           isStarting={startingAgentPubkey === agent.pubkey}
           label={title}
           startTestId={`agent-runtime-start-${agent.pubkey}`}
