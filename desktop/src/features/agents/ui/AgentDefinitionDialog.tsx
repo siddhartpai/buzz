@@ -38,6 +38,7 @@ import {
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
+  localModeGateSatisfiedForSubmit,
   formatRuntimeOptionLabel,
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
@@ -456,7 +457,12 @@ export function AgentDefinitionDialog({
   // requiredEnvKeys: the gate already handles baked-, global-, and file-
   // satisfied keys so no further filtering is needed.
   const { requiredEnvKeys } = localModeGate;
-  const localModeSatisfied = localModeGate.satisfied;
+  // Server-hosted definitions authenticate on the spawner (e.g. OAuth) — a
+  // credential key missing on this machine must not block Save there.
+  const localModeSatisfied = localModeGateSatisfiedForSubmit(
+    localModeGate,
+    serverContext !== null,
+  );
   // Effective provider: agent value → global fallback → file fallback.
   // Mirrors the chain inside computeLocalModeGate so model-option scoping and
   // model requiredness are consistent with the readiness gate.
@@ -537,6 +543,7 @@ export function AgentDefinitionDialog({
       ? effectiveProvider
       : "",
     selectedRuntime,
+    serverManaged: serverContext !== null,
   });
   const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
