@@ -42,6 +42,7 @@ import {
   KIND_MEMBER_REMOVED_NOTIFICATION,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
+  KIND_SPAWNER_AGENT_STATUS,
   KIND_SPAWNER_ANNOUNCEMENT,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
@@ -101,6 +102,21 @@ type MockManagedAgentSeed = {
  */
 type MockSpawnerAnnouncementSeed = {
   pubkey: string;
+  content: Record<string, unknown>;
+  createdAt?: number;
+};
+
+/**
+ * A kind:30179 agent status served to the live status subscription.
+ *
+ * `content` is the raw snake_case status body a real spawner publishes (e.g.
+ * `{ phase: "stopped", needs_credential: true }`), authored by
+ * `spawnerPubkey` with the `d` tag set to `slug` — matching how the status
+ * store keys entries by `(event.pubkey, slug)`.
+ */
+type MockSpawnerStatusSeed = {
+  spawnerPubkey: string;
+  slug: string;
   content: Record<string, unknown>;
   createdAt?: number;
 };
@@ -234,6 +250,8 @@ type E2eConfig = {
     managedAgentRuntimes?: MockManagedAgentRuntimeSeed[];
     /** kind:10180 announcements replayed to the spawner-directory subscription. */
     spawnerAnnouncements?: MockSpawnerAnnouncementSeed[];
+    /** kind:30179 statuses replayed to the spawner-status subscription. */
+    spawnerStatuses?: MockSpawnerStatusSeed[];
     personas?: MockPersonaSeed[];
     teams?: MockTeamSeed[];
     relayAgents?: MockRelayAgentSeed[];
@@ -921,6 +939,27 @@ function createMockSpawnerAnnouncementEvents(): RelayEvent[] {
       JSON.stringify(seed.content),
       [],
       seed.pubkey,
+      seed.createdAt ?? Math.floor(Date.now() / 1000),
+    ),
+  );
+}
+
+/**
+ * kind:30179 statuses for this owner's server agents, from
+ * `mock.spawnerStatuses`. Authored by the seeded spawner pubkey — the status
+ * store keys entries by `(event.pubkey, d tag)` — with the owner `p`-tagged the
+ * way a real spawner addresses status to the spec author.
+ */
+function createMockSpawnerStatusEvents(): RelayEvent[] {
+  return (getConfig()?.mock?.spawnerStatuses ?? []).map((seed) =>
+    createMockEvent(
+      KIND_SPAWNER_AGENT_STATUS,
+      JSON.stringify(seed.content),
+      [
+        ["d", seed.slug],
+        ["p", getMockMemberPubkey(getConfig())],
+      ],
+      seed.spawnerPubkey,
       seed.createdAt ?? Math.floor(Date.now() / 1000),
     ),
   );
@@ -8833,6 +8872,12 @@ function sendToMockSocket(args: {
       // stored replay has to happen here rather than in emitMockHistory.
       if (kinds.has(KIND_SPAWNER_ANNOUNCEMENT)) {
         for (const event of createMockSpawnerAnnouncementEvents()) {
+          sendWsText(socket.handler, ["EVENT", subId, event]);
+        }
+      }
+      // Same reasoning for agent status: a live REQ with no channel scope.
+      if (kinds.has(KIND_SPAWNER_AGENT_STATUS)) {
+        for (const event of createMockSpawnerStatusEvents()) {
           sendWsText(socket.handler, ["EVENT", subId, event]);
         }
       }
