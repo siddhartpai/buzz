@@ -14,11 +14,10 @@ import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { AgentCreationPreview } from "./AgentCreationPreview";
-import { PersonaDropdownField } from "./PersonaDropdownField";
+import { pushServerPromptUpdateAfterSubmit } from "./serverPromptUpdatePush";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
-import { runtimeAvailabilityWarning } from "./runtimeAvailabilityWarning";
 import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
   canSubmitPersonaDialog,
@@ -38,6 +37,7 @@ import {
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
+  localModeGateSatisfiedForSubmit,
   formatRuntimeOptionLabel,
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
@@ -48,15 +48,9 @@ import {
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
-  PERSONA_LABEL_OPTIONAL_CLASS,
   shouldClearKnownModelForSelectionScope,
-  sortPersonaRuntimes,
 } from "./agentConfigOptions";
-import { RequiredFieldLabel } from "./agentConfigControls";
-import {
-  modelDropdownOptions as buildModelDropdownOptions,
-  relayMeshModelPickerState,
-} from "./relayMeshModelPicker";
+import { relayMeshModelPickerState } from "./relayMeshModelPicker";
 import {
   selectionOnModelDropdownChange,
   selectionOnProviderDropdownChange,
@@ -83,6 +77,20 @@ import {
 } from "./agentAiConfigurationPolicy";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
+import { useServerAgents } from "../useServerAgents";
+import { slugFromName } from "../spawnerPreference";
+import { LlmProviderField } from "./LlmProviderField";
+import {
+  buildPersonaModelDropdownOptions,
+  buildPersonaRuntimeDropdown,
+  PersonaRuntimeWarning,
+} from "./personaRuntimeDropdown";
+import { ServerModelField } from "./ServerModelField";
+import { ServerRunsOnBanner } from "./ServerRunsOnBanner";
+import {
+  useServerAgentEditContext,
+  withCurrentValueOption,
+} from "./useServerAgentEditContext";
 
 type AgentDefinitionDialogProps = {
   open: boolean;
@@ -348,10 +356,8 @@ export function AgentDefinitionDialog({
     };
 
     if ("id" in initialValues) {
-      await onSubmit({
-        id: initialValues.id,
-        ...baseInput,
-      });
+      const result = await onSubmit({ id: initialValues.id, ...baseInput });
+      await pushServerPromptUpdateAfterSubmit(serverContext, result, baseInput);
       return;
     }
 
@@ -373,6 +379,27 @@ export function AgentDefinitionDialog({
     (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
     blankRuntimeModelProviderEditable;
   const trimmedProvider = provider.trim();
+  // Server residency: a definition deployed to a spawner is configured there,
+  // so the harness belongs to the host and the model catalog is the one it
+  // advertises. Matched on the *initial* name — the slug the spec was published
+  // under does not change while the user is retyping the display name.
+  const { agents: serverAgents } = useServerAgents();
+  const deployedServerAgent = React.useMemo(() => {
+    if (isCreateMode || !initialValues) return null;
+    const slug = slugFromName(initialValues.displayName);
+    if (!slug) return null;
+    return serverAgents.find((candidate) => candidate.slug === slug) ?? null;
+  }, [isCreateMode, initialValues, serverAgents]);
+  const server = useServerAgentEditContext({
+    relocatedToSpawner: null,
+    deployedSpawnerPubkey: deployedServerAgent?.spawnerPubkey ?? null,
+    agentPubkey: deployedServerAgent?.status.agentPubkey ?? null,
+    slug: deployedServerAgent?.slug ?? null,
+    provider: trimmedProvider,
+  });
+  const serverContext = server.context;
+  const serverAi = server.ai;
+
   // Required credential env keys for this runtime + provider combination.
   // Used to show required markers on the LLM provider label and amber
   // locked rows in the env vars editor.
@@ -429,7 +456,12 @@ export function AgentDefinitionDialog({
   // requiredEnvKeys: the gate already handles baked-, global-, and file-
   // satisfied keys so no further filtering is needed.
   const { requiredEnvKeys } = localModeGate;
-  const localModeSatisfied = localModeGate.satisfied;
+  // Server-hosted definitions authenticate on the spawner (e.g. OAuth) — a
+  // credential key missing on this machine must not block Save there.
+  const localModeSatisfied = localModeGateSatisfiedForSubmit(
+    localModeGate,
+    serverContext !== null,
+  );
   // Effective provider: agent value → global fallback → file fallback.
   // Mirrors the chain inside computeLocalModeGate so model-option scoping and
   // model requiredness are consistent with the readiness gate.
@@ -510,6 +542,7 @@ export function AgentDefinitionDialog({
       ? effectiveProvider
       : "",
     selectedRuntime,
+    serverManaged: serverContext !== null,
   });
   const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
@@ -553,44 +586,16 @@ export function AgentDefinitionDialog({
   const showCustomProviderInput =
     llmProviderFieldVisible && isCustomProviderEditing;
   const runtimeDropdownValue = runtime.trim() || NO_RUNTIME_DROPDOWN_VALUE;
-  const sortedRuntimes = React.useMemo(
-    () => sortPersonaRuntimes(runtimes),
-    [runtimes],
-  );
-  const blankRuntimeOptionLabel = runtimesLoading
-    ? "Loading harnesses..."
-    : isCreateMode
-      ? "Choose a harness"
-      : "No preference (use app default)";
-  const runtimeDropdownOptions: PersonaDropdownOption[] = [
-    ...(!isCreateMode
-      ? [
-          {
-            label: blankRuntimeOptionLabel,
-            value: NO_RUNTIME_DROPDOWN_VALUE,
-          },
-        ]
-      : []),
-    ...sortedRuntimes.map((candidate) => ({
-      disabled:
-        isCreateMode &&
-        defaultRuntime !== null &&
-        candidate.availability !== "available",
-      label: `${formatRuntimeOptionLabel(candidate)}${
-        isCreateMode && candidate.id === defaultRuntime?.id ? " (default)" : ""
-      }`,
-      value: candidate.id,
-    })),
-  ];
-  if (
-    runtime.trim().length > 0 &&
-    !runtimeDropdownOptions.some((option) => option.value === runtime)
-  ) {
-    runtimeDropdownOptions.push({
-      label: `${runtime.trim()} (current)`,
-      value: runtime.trim(),
-    });
-  }
+  const {
+    blankLabel: blankRuntimeOptionLabel,
+    options: runtimeDropdownOptions,
+  } = buildPersonaRuntimeDropdown({
+    defaultRuntime,
+    isCreateMode,
+    runtime,
+    runtimes,
+    runtimesLoading,
+  });
   const runtimeSummaryLabel = selectedRuntime
     ? formatRuntimeOptionLabel(selectedRuntime)
     : runtime.trim() || "Not configured";
@@ -603,32 +608,14 @@ export function AgentDefinitionDialog({
       })),
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
   ];
-  const modelDropdownOptions: PersonaDropdownOption[] =
-    buildModelDropdownOptions({
-      allowCustom: !isRelayMesh,
-      globalModel: undefined,
-      loading: modelDiscoveryLoading && discoveredModelOptions === null,
-      loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
-      options: modelOptions,
-    })
-      .filter(
-        (option) => isRelayMesh || option.value !== AUTO_MODEL_DROPDOWN_VALUE,
-      )
-      .map((option) =>
-        isRelayMesh && option.value === AUTO_MODEL_DROPDOWN_VALUE
-          ? { ...option, label: "Automatic" }
-          : option,
-      );
+  const modelDropdownOptions = buildPersonaModelDropdownOptions({
+    isRelayMesh,
+    loading: modelDiscoveryLoading && discoveredModelOptions === null,
+    loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
+    options: modelOptions,
+  });
   const previewLabel = displayName.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
-  const runtimeWarningText = selectedRuntime
-    ? runtimeAvailabilityWarning(selectedRuntime)
-    : null;
-  const runtimeWarning = runtimeWarningText ? (
-    <p className="text-xs text-warning">
-      {runtimeWarningText} Visit Settings &gt; Agents to set it up.
-    </p>
-  ) : null;
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
     : ADVANCED_FIELDS_MOTION_TRANSITION;
@@ -636,6 +623,7 @@ export function AgentDefinitionDialog({
   React.useEffect(() => {
     if (
       !open ||
+      serverContext ||
       !modelFieldVisible ||
       isCustomModelEditing ||
       !shouldClearKnownModelForSelectionScope({
@@ -656,6 +644,7 @@ export function AgentDefinitionDialog({
     open,
     effectiveProvider,
     runtime,
+    serverContext,
   ]);
 
   const selection: RuntimeModelProviderSelection = {
@@ -775,6 +764,14 @@ export function AgentDefinitionDialog({
           />
 
           <div className="space-y-5">
+            {serverContext ? (
+              <ServerRunsOnBanner
+                pendingUpdate={server.pendingUpdate}
+                runtime={server.runtime}
+                spawnerName={serverContext.spawnerName}
+              />
+            ) : null}
+
             <div className="space-y-1.5">
               <label
                 className="text-sm font-medium text-foreground"
@@ -837,66 +834,44 @@ export function AgentDefinitionDialog({
               className="space-y-5"
               data-testid={`agent-${aiConfigurationMode}-configuration-section`}
             >
-              {aiConfigurationMode === "custom" ? (
+              {aiConfigurationMode === "custom" && !serverContext ? (
                 <AgentHarnessField
                   disabled={isPending || runtimesLoading}
                   onValueChange={handleRuntimeDropdownChange}
                   options={runtimeDropdownOptions}
                   placeholder={blankRuntimeOptionLabel}
                   value={runtimeDropdownValue}
-                  warning={runtimeWarning}
+                  warning={<PersonaRuntimeWarning runtime={selectedRuntime} />}
                 />
               ) : null}
 
-              {llmProviderFieldVisible && aiConfigurationMode === "custom" ? (
-                <div className="space-y-1.5">
-                  <RequiredFieldLabel
-                    htmlFor="persona-llm-provider"
-                    isRequired={providerIsRequired}
-                  >
-                    LLM provider
-                    {!providerIsRequired ? (
-                      <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
-                        Optional
-                      </span>
-                    ) : null}
-                  </RequiredFieldLabel>
-                  <PersonaDropdownField
-                    disabled={isPending}
-                    id="persona-llm-provider"
-                    onValueChange={handleProviderDropdownChange}
-                    options={providerDropdownOptions}
-                    placeholder="Choose a provider"
-                    value={providerSelectValue}
-                  />
-                  {showCustomProviderInput ? (
-                    <div
-                      className={cn(
-                        "mt-2 flex min-h-11 items-center px-3",
-                        PERSONA_FIELD_SHELL_CLASS,
-                      )}
-                    >
-                      <Input
-                        aria-label="Custom provider ID"
-                        autoCorrect="off"
-                        className={cn(
-                          "h-8 px-0 py-0 leading-6",
-                          PERSONA_FIELD_CONTROL_CLASS,
-                        )}
-                        disabled={isPending}
-                        id="persona-custom-provider"
-                        onChange={(event) => setProvider(event.target.value)}
-                        placeholder="Custom provider ID"
-                        value={provider}
-                      />
-                    </div>
-                  ) : null}
-                </div>
+              {aiConfigurationMode === "custom" &&
+              (serverContext ? serverAi !== null : llmProviderFieldVisible) ? (
+                <LlmProviderField
+                  customInputId="persona-custom-provider"
+                  disabled={isPending}
+                  id="persona-llm-provider"
+                  isRequired={providerIsRequired}
+                  onProviderTextChange={setProvider}
+                  onValueChange={handleProviderDropdownChange}
+                  options={
+                    serverContext && serverAi
+                      ? withCurrentValueOption(server.providerOptions, provider)
+                      : providerDropdownOptions
+                  }
+                  placeholder="Choose a provider"
+                  providerValue={provider}
+                  selectValue={
+                    serverContext ? trimmedProvider : providerSelectValue
+                  }
+                  showCustomInput={!serverContext && showCustomProviderInput}
+                />
               ) : null}
 
               {llmProviderFieldVisible &&
               aiConfigurationMode === "custom" &&
-              topLevelSecretEnvVar ? (
+              topLevelSecretEnvVar &&
+              !serverContext ? (
                 <PersonaProviderApiKeyField
                   disabled={isPending}
                   isInherited={apiKeyIsInherited}
@@ -917,28 +892,58 @@ export function AgentDefinitionDialog({
                 />
               ) : null}
 
+              {serverContext &&
+              !serverAi &&
+              aiConfigurationMode === "custom" ? (
+                <div className="space-y-1.5">
+                  <label
+                    className="text-sm font-medium text-foreground"
+                    htmlFor="persona-server-model"
+                  >
+                    Model
+                  </label>
+                  <ServerModelField
+                    disabled={isPending}
+                    id="persona-server-model"
+                    onChange={setModel}
+                    value={model}
+                  />
+                </div>
+              ) : null}
+
               <AnimatePresence initial={false}>
-                {modelFieldVisible && aiConfigurationMode === "custom" ? (
+                {(serverContext ? serverAi !== null : modelFieldVisible) &&
+                aiConfigurationMode === "custom" ? (
                   <PersonaModelField
                     disabled={isPending}
                     isExplicitModelRequired={isExplicitModelRequired}
                     model={model}
                     modelDiscoveryStatus={modelDiscoveryStatus}
-                    modelDropdownOptions={modelDropdownOptions}
-                    modelSelectValue={modelSelectValue}
+                    modelDropdownOptions={
+                      serverContext && serverAi
+                        ? withCurrentValueOption(server.modelOptions, model)
+                        : modelDropdownOptions
+                    }
+                    modelSelectValue={
+                      serverContext && serverAi
+                        ? model.trim()
+                        : modelSelectValue
+                    }
                     onCustomModelChange={setModel}
                     showSharedComputeAutoHint={
                       isRelayMesh &&
                       modelSelectValue === AUTO_MODEL_DROPDOWN_VALUE
                     }
                     onModelValueChange={handleModelDropdownChange}
-                    showCustomModelInput={showCustomModelInput}
+                    showCustomModelInput={
+                      serverContext ? false : showCustomModelInput
+                    }
                     transition={advancedFieldsTransition}
                   />
                 ) : null}
               </AnimatePresence>
 
-              {aiConfigurationMode === "defaults" ? (
+              {aiConfigurationMode === "defaults" && !serverContext ? (
                 <AgentCreateAiDefaultsSummary
                   canChooseProvider={runtimeCanChooseLlmProvider}
                   harness={runtimeSummaryLabel}
@@ -949,6 +954,12 @@ export function AgentDefinitionDialog({
                   onEditDefaults={() => setAiDefaultsOpen(true)}
                   triggerRef={aiDefaultsTriggerRef}
                 />
+              ) : null}
+
+              {serverContext ? (
+                <p className="text-xs text-muted-foreground">
+                  Applied on the server. Saving restarts the agent.
+                </p>
               ) : null}
             </div>
 
